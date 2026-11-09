@@ -1,0 +1,250 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.25.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: '.node-version'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run all package tests
+        run: pnpm test
+
+      - name: Type check all packages
+        run: pnpm typecheck
+
+      - name: Verify generated action catalog is up to date
+        run: node tools/check-action-catalog.mjs
+
+  build:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: win-x64
+            os: windows-latest
+            target: win32-x64
+          - name: linux-x64
+            os: ubuntu-latest
+            target: linux-x64
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            target: linux-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.25.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: '.node-version'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run native smoke tests
+        run: pnpm test:native
+
+      # Always builds the WebUI flavor — no separate "core-only" artifact.
+      - name: Build project
+        env:
+          SNOWLUMA_TARGET: ${{ matrix.target }}
+        run: pnpm run build:all
+
+      - name: Verify release layout
+        run: pnpm check:release-layout
+
+      # Naming convention:
+      #   SnowLuma-<tag>-<arch>.zip|tar.gz        – zero-install (node bundled)
+      #   SnowLuma-<tag>-<arch>-lite.zip|tar.gz   – user provides Node ^24.22.1 or >=26.12.1
+      - name: Package (windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist\*" -DestinationPath "SnowLuma-${{ github.ref_name }}-${{ matrix.name }}-lite.zip"
+          Copy-Item (Get-Command node).Source -Destination "dist\node.exe"
+          Compress-Archive -Path "dist\*" -DestinationPath "SnowLuma-${{ github.ref_name }}-${{ matrix.name }}.zip"
+
+      - name: Package (linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          chmod +x dist/launcher.sh
+          tar -czf "SnowLuma-${{ github.ref_name }}-${{ matrix.name }}-lite.tar.gz" -C dist .
+          cp "$(command -v node)" dist/node
+          chmod +x dist/node
+          tar -czf "SnowLuma-${{ github.ref_name }}-${{ matrix.name }}.tar.gz" -C dist .
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.name }}
+          path: SnowLuma-${{ github.ref_name }}-${{ matrix.name }}*
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for git log)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+
+      - name: Collect release assets
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.zip' -o -name '*.tar.gz' \) -exec cp {} release/ \;
+          ls -lh release/
+
+      - name: Generate release note
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          previousTag="$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || true)"
+          if [[ -n "$previousTag" ]]; then
+            range="$previousTag..$tag"
+            comparison="[查看 ${previousTag} → ${tag} 的完整差异](https://github.com/${GITHUB_REPOSITORY}/compare/${previousTag}...${tag})"
+          else
+            range="$tag"
+            comparison=""
+          fi
+          changes="$(git log --no-merges --invert-grep --grep='^chore(release):' --pretty=format:"- %s ([%h](https://github.com/${GITHUB_REPOSITORY}/commit/%H))" "$range")"
+          [[ -z "$changes" ]] && changes="- No commit changes detected."
+          cat > release-notes.md <<EOF
+          # SnowLuma ${tag}
+
+          > **跨平台正式支持：** Windows x64、Linux x64 与 Linux arm64 均可完整运行 SnowLuma，包含 QQ 接入、OneBot v11 与 WebUI 管理能力。
+
+          ## 选择下载
+
+          | 平台 | 完整版（内置 Node.js，推荐） | Lite（Node.js 24.22.1 / 26.12.1 起） |
+          | --- | --- | --- |
+          | Windows x64 | \`SnowLuma-${tag}-win-x64.zip\` | \`SnowLuma-${tag}-win-x64-lite.zip\` |
+          | Linux x64 | \`SnowLuma-${tag}-linux-x64.tar.gz\` | \`SnowLuma-${tag}-linux-x64-lite.tar.gz\` |
+          | Linux arm64 | \`SnowLuma-${tag}-linux-arm64.tar.gz\` | \`SnowLuma-${tag}-linux-arm64-lite.tar.gz\` |
+
+          完整版适合直接解压运行；Lite 版不包含 Node.js，但其余运行时依赖和 WebUI 静态资源保持一致。
+
+          ## 快速开始
+
+          1. 解压与你的系统架构匹配的压缩包。
+          2. Windows 运行 \`launcher.bat\`；Linux 运行 \`./launcher.sh\`。
+          3. 浏览器访问 http://localhost:5099 ，初始账号为 \`admin\`，密码见启动日志。
+
+          无人值守部署可同时设置 \`SNOWLUMA_ACCEPT_EULA=1\` 与 \`SNOWLUMA_ACCEPT_PRIVACY=1\` 完成协议确认。设置这些变量即表示运营者已阅读并同意发行包内的 EULA 与隐私政策；缺少任意一项时仍会显示同意页面。
+
+          ## 本次更新
+
+          ${changes}
+
+          ${comparison}
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.zip
+            release/*.tar.gz
+          body_path: release-notes.md
+          overwrite_files: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # Triggers the Docker image build on SnowLuma.Docker.Framework once the
+  # GitHub Release (and its per-arch tarballs) is published, so the Docker
+  # workflow can pull the matching `SnowLuma-<tag>-linux-<arch>-lite.tar.gz`
+  # asset and bake it into the container.
+  #
+  # Chained as a job dependency rather than via `on: release: published`
+  # because workflows triggered by GITHUB_TOKEN cannot fire downstream
+  # workflow events (GitHub anti-loop safeguard). Doing it as `needs: release`
+  # keeps the dispatch under our PAT.
+  dispatch-docker:
+    needs: release
+    runs-on: ubuntu-latest
+    environment: SnowLuma
+    steps:
+      - name: Trigger Docker.Framework workflow_dispatch
+        uses: actions/github-script@v8
+        env:
+          RELEASE_REPOSITORY: ${{ vars.DOCKER_RELEASE_REPOSITORY }}
+          DOCKER_IMAGE: ${{ vars.DOCKER_IMAGE }}
+          DOCKER_PLATFORMS: ${{ vars.DOCKER_PLATFORMS }}
+          DOCKER_WORKFLOW: ${{ vars.DOCKER_WORKFLOW }}
+          DOCKER_REF: ${{ vars.DOCKER_REF }}
+          GHCR_IMAGE: ${{ vars.GHCR_IMAGE }}
+        with:
+          github-token: ${{ secrets.SNOWLUMA_TOKEN }}
+          script: |
+            const target = process.env.RELEASE_REPOSITORY;
+            if (!target || !target.includes('/')) {
+              throw new Error('Set SnowLuma environment variable DOCKER_RELEASE_REPOSITORY to owner/repo.');
+            }
+
+            const [owner, repo] = target.split('/');
+            const tag = context.ref.replace('refs/tags/', '');
+            const sourceRepo = context.repo.owner + '/' + context.repo.repo;
+            const image = process.env.DOCKER_IMAGE || 'motricseven7/snowluma';
+            const platforms = process.env.DOCKER_PLATFORMS || 'linux/amd64,linux/arm64';
+            const workflowId = process.env.DOCKER_WORKFLOW || 'docker-image.yml';
+            const ref = process.env.DOCKER_REF || 'main';
+            const ghcrImage = process.env.GHCR_IMAGE || '';
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner,
+              repo,
+              workflow_id: workflowId,
+              ref,
+              inputs: {
+                image,
+                tag,
+                push: 'true',
+                platforms,
+                snowluma_tag: tag,
+                snowluma_repository: sourceRepo,
+                ghcr_image: ghcrImage,
+              },
+            });
+
+            core.info(`Dispatched ${workflowId}@${ref} on ${target} for SnowLuma release ${sourceRepo}@${tag} (image=${image}, ghcr_image=${ghcrImage}, platforms=${platforms}).`);

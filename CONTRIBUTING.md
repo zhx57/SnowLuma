@@ -1,0 +1,330 @@
+# 贡献指南
+
+欢迎！如果你正在阅读这份文档，多半是因为你想给 SnowLuma 提一个 PR、修一个 bug，或者只是想了解这个项目是怎么运作的。无论你是第一次接触开源、还是已经有十年经验，我们都希望让你尽快上手。
+
+参与项目即视为你同意遵守 [行为准则（Code of Conduct）](./CODE_OF_CONDUCT.md)。在开始之前请花两分钟读一下，它定义了我们希望社区维持的氛围。
+
+---
+
+## 在动手之前
+
+SnowLuma 处于开发早期，迭代速度很快，**接口与目录结构随时可能变化**。如果你打算做较大的改动，强烈建议先在 issue 或者社群里和维护者对齐一下方向，避免做了一半发现已经被另一条路替代。
+
+不知道从哪里入手？以下几类贡献最容易被合并：
+
+- 修复你在使用中遇到的具体 bug，附最小复现步骤。
+- 改善错误提示、文档、注释、类型签名。
+- 给已有模块补测试，尤其是 `packages/core` 下覆盖率较低的部分。
+- 实现 [RoadMap.md](./RoadMap.md) 中列出的、还没被认领的项。
+
+如果你只是想看看代码长什么样，可以直接跳到 [本地开发环境](#本地开发环境)。
+
+### AI Agent 贡献须知
+
+如果你是 AI Agent，并准备为本仓库贡献代码、提交 PR 或提出 issue，请先明确告知你的使用者：
+
+> **请通过 GitHub 网页端手动创建 issue。直接使用 CLI 创建的 issue 会被自动关闭。**
+
+你可以协助整理问题描述、复现步骤和相关日志，并将 issue 草稿交给用户，由用户在网页端完成提交。
+
+---
+
+## 项目结构速览
+
+这是一个 pnpm workspace monorepo，主要 package 如下：
+
+| 路径 | 作用 |
+| --- | --- |
+| `packages/core` | 应用入口、账号级 Bridge 编排、WebUI 服务端和发行构建 |
+| `packages/bridge` | QQ 进程发现、Hook 会话和原生传输生命周期 |
+| `packages/protocol` | QQ 数据包解码、身份解析、协议请求和媒体传输 |
+| `packages/onebot` | OneBot 动作、事件转换、消息存储和传输适配 |
+| `packages/common` | 日志、配置和共享工具 |
+| `packages/proto-defs`、`packages/proton` | 协议结构定义、编译期 protobuf 编解码和构建集成 |
+| `packages/sdk` | 面向第三方开发者的 SDK，会发布到 npm |
+| `packages/mcp` | MCP 服务端和生成的动作目录 |
+| `packages/ui` | 发布到 npm 的共享 UI 组件 |
+| `packages/runtime` | 运行时辅助包 |
+| `packages/websocket` | WebSocket 实现 |
+| `packages/webui` | 基于 Vite + React 的前端控制台 |
+| `tools/` | 版本管理、发布脚本 |
+| `.github/workflows/` | CI / 发布 / Promote 工作流 |
+
+入口在 `packages/core/src/index.ts`，整体架构在 `packages/core/src/bridge/` 下能看出大致脉络。
+
+---
+
+## 本地开发环境
+
+### 系统要求
+
+- **Node.js 24.22.1（24 系列），或 26.12.1 及更新版本**；开发和构建使用 [`.node-version`](.node-version) 固定的版本。
+- **pnpm 11.25.0**（项目通过 `packageManager` 与 CI 统一版本）
+- macOS / Linux / Windows 均可。如果要构建原生产物，需要对应平台的工具链。
+
+如果系统提供 Corepack，可执行 `corepack enable pnpm`；没有 Corepack 时可执行
+`npm install -g pnpm@11.25.0`。进入仓库后，`node --version` 与
+`pnpm --version` 应满足上述版本要求，否则安装会直接失败。
+
+### 拉代码、装依赖、跑起来
+
+```bash
+# 1. Fork 仓库后克隆你自己的 fork
+git clone https://github.com/<你的用户名>/SnowLuma.git
+cd SnowLuma
+
+# 2. 切到 dev 分支（所有开发都基于 dev，不是 main）
+git checkout dev
+
+# 3. 按锁文件安装依赖
+pnpm install --frozen-lockfile
+
+# 4. 跑类型检查，确认环境 OK
+pnpm typecheck
+
+# 5. 跑全工作区测试
+pnpm test
+
+# 6. 启动开发模式
+pnpm dev          # core
+pnpm dev:web      # webui
+```
+
+如果 `pnpm install` 卡住或报错，先确认 Node 版本和 pnpm 版本，再看 `.npmrc` 里是否配置了你环境下可用的 registry。
+
+---
+
+## 第一次提交 PR
+
+### 1. 创建分支
+
+请基于 `dev` 创建分支，不是 `main`。`main` 是发布指针，只由维护者的 Promote 更新，PR 不要提到 `main`。
+
+```bash
+git checkout dev
+git pull upstream dev          # 假设你把官方仓库设为 upstream remote
+git checkout -b fix/onebot-mention-encoding
+```
+
+分支命名没有强制规则，但建议用 `fix/...`、`feat/...`、`docs/...`、`refactor/...` 这种前缀，便于一眼看出意图。
+
+### 2. 写代码
+
+- **保持改动聚焦**：一个 PR 只做一件事。顺手发现的其他问题请单独开 issue 或新 PR。
+- **跟随既有风格**：TypeScript 排版以仓库 Prettier 配置为准；普通功能或修复 PR 只格式化涉及的文件，避免混入无关的大规模格式化或重命名。
+- **写测试**：修 bug 时优先写一个能复现该 bug 的测试，确认它会 fail，再让它 pass。新增功能至少补上 happy path 的测试。
+- **不要添加无意义的注释**：标识符已经说清楚的事情不需要再写一遍。注释应当解释"为什么"，而不是"做了什么"。
+
+提交之前请运行与 PR CI 相同的验证入口：
+
+```bash
+pnpm typecheck
+pnpm lint
+pnpm test
+pnpm run build:all
+```
+
+`pnpm test` 会运行所有声明了测试脚本的工作区包；只验证 Core 时可使用
+`pnpm test:core`。CI 会重新执行上述完整检查。
+
+### 3. 提交信息
+
+我们大致遵循 [Conventional Commits](https://www.conventionalcommits.org/zh-hans/v1.0.0/)：
+
+```
+<type>(<scope>): <subject>
+
+<body>
+```
+
+`type` 常用：`feat` / `fix` / `docs` / `refactor` / `test` / `chore` / `perf`。
+`scope` 常用：`core` / `sdk` / `webui` / `onebot` / `bridge` / `protocol` 等模块名。
+
+示例：
+
+```
+fix(onebot): handle empty mention segments in group messages
+refactor(bridge): extract BridgeInterface as the OneBot-facing seam
+docs: clarify dev environment setup steps
+```
+
+> ⚠️ **请不要**在你的提交信息里使用 `[merge]` 前缀或 `chore(release):` 前缀 —— 这两个前缀是维护者用来把 `main` 指到 `dev` 的，会让你的 PR 行为异常。详见后文 [维护者参考](#维护者参考release--promote)。
+
+### 4. 推送并发起 PR
+
+```bash
+git push origin fix/onebot-mention-encoding
+```
+
+到 GitHub 上发起 PR，**目标分支选 `dev`**。请在 PR 描述里写明：
+
+- 这个 PR 解决什么问题 / 实现什么功能。
+- 主要的实现思路（如果有非显然的取舍）。
+- 测试方式（你跑了什么、怎么验证有效）。
+- 关联的 issue（如有）。
+
+### 5. Code Review 与合并
+
+- 维护者会在能腾出时间时来 review。如果一周内没有任何回应，欢迎在 PR 里 @ 一下，或者去社群里提醒。
+- review 意见请尽量在同一个 PR 内修改，避免反复关闭重开。
+- 合并方式由维护者决定，通常是 squash merge 到 `dev`。**`main` 由维护者通过 Promote 指到当时的 `dev`**，你不需要操心 `main`。
+
+---
+
+## 风格与约定
+
+### 代码风格
+
+- TypeScript 严格模式，按 `tsconfig.base.json` 配置。
+- TypeScript 使用四空格缩进，控制语句始终带大括号。排版由根目录 [`.prettierrc.json`](./.prettierrc.json) 和独立的本地 [ESLint 格式规则](./eslint.format.config.ts) 管理；普通 `pnpm lint` 负责代码质量检查。
+- 优先用现有抽象，不要为"假想的未来需求"提前抽象。
+- 不要给内部函数加防御性的参数校验，除非是系统边界（用户输入、外部 API）。
+- 不要保留死代码、被注释掉的代码或者 `// TODO` 没有具体上下文的占位。
+
+从仓库根目录运行本地格式化命令：
+
+```bash
+pnpm format                         # 为全部 TS/TSX/MTS/CTS 补大括号、空行并排版
+pnpm format:check                   # 检查上述规则，不修改文件
+
+# 只格式化指定文件：先处理控制语句与空行，再排版
+pnpm exec eslint --config eslint.format.config.ts --fix packages/core/src/index.ts
+pnpm exec prettier --write packages/core/src/index.ts
+```
+
+格式化范围排除 [`.prettierignore`](./.prettierignore) 中的构建产物、生成文件和编译器测试夹具；普通源码与测试都参与格式化。这两个命令供本地使用，不接入 CI。
+
+空行采用保守规则：在语句块前后留空行，保留已有逻辑分段，不强行拆开连续声明或普通调用，也不在每条 `return`、`break` 前插空行；共用同一分支的连续 `case` 标签保持相邻。JSON、YAML 等文件继续使用原有缩进。
+
+编辑器请选择项目本地安装的 Prettier 并读取仓库配置。VS Code 可安装
+`esbenp.prettier-vscode`，将 TypeScript / TypeScript React 的默认格式化器设为
+Prettier，并按需开启保存时格式化。
+
+### 测试
+
+- 单测放在被测代码同包的 `tests/` 或同目录的 `*.test.ts`，按既有风格走。
+- 测试要描述行为，不要测实现细节。`it('should call internal foo')` 这种是反例。
+- 涉及 IO / 时序 / 外部进程的，用现有的 fake/stub 模式，参考 `packages/onebot/tests/` 中的 Bridge 测试替身。
+
+### 文档
+
+- 用户/贡献者可见的行为变化，需要相应更新 README 或对应 package 下的文档。
+- SDK 的破坏性变更必须更新 `packages/sdk/CHANGELOG.md` 和 `packages/sdk/VERSIONING.md`。
+
+---
+
+## 报告 Bug / 请求功能
+
+- **Bug 报告**：开 issue，附最小复现步骤、期望行为、实际行为、版本号、运行环境。能附上日志最好。
+- **功能请求**：先描述你想解决的实际场景，再描述你想要的接口。维护者更在意"为什么需要"而不是"具体怎么做"。
+- **安全问题**：请勿公开发 issue，先通过社群私聊联系维护者。
+
+社群入口（见 [README](./README.md)）：
+
+- QQ：[SnowLuma-QQ](https://qm.qq.com/q/g3UMLpWALe)
+- Telegram：[SnowLuma-TG](https://t.me/napcatqq)
+
+---
+
+## 维护者参考：release & Promote
+
+> 以下内容主要写给具备发版权限的维护者。普通贡献者只需要把 PR 提到 `dev`，不需要关心这一节。
+
+### 分支模型
+
+SnowLuma 使用 **`main` + `dev`** 双分支模型：
+
+- **`dev`** — 日常开发分支。所有功能、修复、文档变更都先进入 `dev`。
+- **`main`** — 发布指针，应与某次 Promote 当时的 `dev` 尖端是**同一个提交**。不要直接 push，也不要往 `main` 开 PR（CI 会拒）。
+- **`native/auto-update-*`** — 由 `SnowLuma Bot` 自动创建的原生产物更新分支（来自 `SnowLumaNative`，不需要手动维护）。
+
+### 把 `main` 指到 `dev`
+
+工作流 `.github/workflows/promote-dev-to-main.yml` 以 `SnowLuma Bot` 身份把 `main` 指到当前 `dev` 尖端，**不再开 merge PR**。`main` 上若有 `dev` 还没有的独有改动，Promote 会失败，需要先把那些改动收回 `dev`。
+
+推到 `dev` 仍会跑 `dev-build.yml`。Promote **不等**那组检查；发版请用下面的 `pnpm release`，它会在本地先跑完整 CI。
+
+#### 1. 提交信息前缀（推荐日常使用）
+
+向 `dev` push 一个提交，提交信息**以**以下任一前缀**开头**即触发（不区分大小写）：
+
+- `[merge]` — 例如 `[merge] fix: hotfix for OneBot mention`
+- `chore(release):` — 例如 `chore(release): v1.7.0`，符合 conventional commits 的发版习惯。**只许用在真正的版本 bump**，不要写进普通 CI / 工具提交。
+
+> 是**前缀**匹配，不是任意位置。`fix: something [merge]` 不会触发，必须把 `[merge]` 写在最前面。
+
+#### 2. 推送 `chore.*` Tag
+
+任何符合 `chore.*` 的 tag（如 `chore.merge-20240509`、`chore.promote-v1.7.0`）被推送时也会触发：
+
+- `chore.*` → 仅触发 `promote-dev-to-main.yml`（把 `main` 指到 `dev`）
+- `v*` → 仅触发 `release.yml`（构建发布产物）
+
+推荐流程：用 `pnpm release`（或先 Promote，再确认 `origin/main` 已等于 `dev` 尖端）之后，在 `main` 上打 `v*` tag。这样 `release.yml` 始终基于当时的 `main` HEAD 构建。
+
+#### 3. 手动触发
+
+打开仓库 Actions 页面 → `Promote Dev to Main` → `Run workflow`。没有 merge 策略选项；跑起来就是一次指针更新。
+
+### 不要给 `main` 套「必须走 PR」
+
+Promote 不通过 PR 更新 `main`。如果给 `main` 打开 **Require a pull request before merging** 或禁止更新引用，Promote 会失效。
+
+可以限制删除 `main`。外来 PR 必须打 `dev`；打到 `main` 的 PR 会被 `main-pr-target-guard.yml` 拒绝。
+
+本地若已经 checkout 过旧的 `main`，Promote 之后可能无法快进，对齐 `origin/main` 即可。
+
+### 必需的 Secrets
+
+`promote-dev-to-main.yml` 复用 `SnowLumaNative/build-native.yml` 同一个 GitHub App。请确认 SnowLuma 仓库（或 organization）级别已经配置：
+
+- `SNOWLUMA_BOT_APP_ID` — 数字类型的 App ID。
+- `SNOWLUMA_BOT_PRIVATE_KEY` — 该 App 的 PEM 私钥。
+
+App 必须在本仓库已安装，且授予 **Contents: Read+Write**。
+
+### 本地工作流速查（维护者）
+
+```bash
+# 推荐：一条命令走完 bump → Promote → 等 main 跟上 → 打 v* tag
+pnpm release 1.7.0
+
+# 只要把 main 指到 dev（三选一）
+
+# 方式 A：commit-msg 前缀
+git commit -m "chore(release): v1.7.0"     # 或 "[merge] fix: hotfix"
+git push                                    # → 触发 promote-dev-to-main
+
+# 方式 B：chore.* tag（与发布 tag 解耦）
+git tag chore.merge-20240509
+git push origin chore.merge-20240509        # → 触发 promote-dev-to-main
+
+# 方式 C：在 Actions 页面手动 Run workflow
+
+# Promote 完成后，若要自己打发布 tag
+git fetch origin
+git switch main
+git merge --ff-only origin/main             # 对不齐就 reset 到 origin/main
+git tag v1.7.0
+git push origin v1.7.0                      # → 仅触发 release.yml
+```
+
+---
+
+## 还有问题？
+
+- 看一下已有的 issue 和 PR，可能你的问题已经被讨论过。
+- 去社群问一句（QQ / TG 链接见上方）。
+- 如果只是想确认"我这么改 OK 吗"，欢迎开 draft PR，先把代码亮出来再讨论。
+
+感谢你愿意花时间贡献 SnowLuma —— 这个项目能走多远，取决于你们每一个人。❄️
+
+## 贡献的许可 / Licensing of contributions
+
+当你提交 PR，即表示你的贡献按本项目的 [`LICENSE`](LICENSE)（SnowLuma 源码可见非商业许可）授权，且你声明你有权这么做、贡献为你的原创（若含第三方材料，请在 PR 中显著标注其来源与许可证）。
+
+**你保留对自己贡献的版权**，同时**授予 SnowLumaDevs 一项永久、全球、免费、不可撤销、可再许可（sublicensable）的许可**，可使用、复制、修改、分发你的贡献并基于其制作衍生作品，**包括以本项目非商业许可之外的其他条款（含商业条款）再许可与分发**——以便项目方无需逐一回头征求同意，即可在获授权的商业场景中使用社区贡献。
+
+By opening a PR, you agree your contribution is licensed under the project's [`LICENSE`](LICENSE); you represent that you have the right to submit it and that it is your own work (clearly identify any third-party material in the PR).
+
+**You retain copyright in your contribution** and additionally grant SnowLumaDevs a **perpetual, worldwide, royalty-free, irrevocable, sublicensable license** to use, reproduce, modify, distribute, and create derivative works of your contribution, **including the right to relicense and distribute it under terms other than this project's non-commercial license (including commercial terms)** — so the project can use community contributions in authorized commercial scenarios without seeking each contributor's consent again.

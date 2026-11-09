@@ -1,0 +1,578 @@
+// Process-wide catalog of QQ system faces. QQ publishes the mapping through
+// 0x9154_1; this store makes that catalog durable, queryable, and safe to use
+// from the asynchronous send path.
+
+import { errorMessage } from '@snowluma/common/errors';
+import { createLogger } from '@snowluma/common/logger';
+import {
+    FetchSysFaces,
+    isSuperFaceEntry,
+    type SysFaceEntry,
+    type SysFacePackEntry,
+} from './oidb-services/sys-faces/fetch-sys-faces';
+import { FetchSysFace } from './oidb-services/sys-faces/fetch-sys-face';
+import type { OidbSender } from './oidb-service';
+
+export type { SysFaceEntry, SysFacePackEntry } from './oidb-services/sys-faces/fetch-sys-faces';
+
+const log = createLogger('SysFace');
+
+/** Wire encoding a face id maps to. `classic` -> legacy FaceElem; `small` ->
+ * CommonElem serviceType 33; `super` -> CommonElem serviceType 37. */
+export type FaceWire =
+    | { kind: 'classic' }
+    | { kind: 'small' }
+    | { kind: 'super'; packId: string; stickerId: string; stickerType: number };
+
+export interface SysFaceCatalogSnapshot {
+    schemaVersion: 1;
+    fetchedAt: number;
+    packs: SysFacePackEntry[];
+}
+
+export interface SysFaceCatalogStorage {
+    load(): Promise<SysFaceCatalogSnapshot | null>;
+    save(snapshot: SysFaceCatalogSnapshot): Promise<void>;
+}
+
+export interface SysFaceStoreOptions {
+    storage?: SysFaceCatalogStorage;
+    fetchCatalog?: (sender: OidbSender) => Promise<SysFacePackEntry[]>;
+    fetchFace?: (sender: OidbSender, faceId: number) => Promise<SysFaceEntry | null>;
+    now?: () => number;
+}
+
+type FaceLookup = { promise: Promise<SysFaceEntry | null> } | { entry: SysFaceEntry | null };
+
+interface IndexedCatalog {
+    packs: SysFacePackEntry[];
+    byId: Map<string, SysFaceEntry>;
+    entryCount: number;
+    overlapCount: number;
+    lookups: Map<number, FaceLookup>;
+}
+
+/** Use animation metadata when available; any numeric id has a small-face encoding. */
+export function faceWireFor(entry: SysFaceEntry | null | undefined, faceId: number): FaceWire {
+    if (entry && isSuperFaceEntry(entry)) {
+        if (
+            entry.aniStickerPackId == null ||
+            entry.aniStickerId == null ||
+            entry.aniStickerType == null
+        ) {
+            throw new Error(`QQ system face id ${faceId} has incomplete super-face metadata`);
+        }
+
+        return {
+            kind: 'super',
+            packId: String(entry.aniStickerPackId),
+            stickerId: String(entry.aniStickerId),
+            stickerType: entry.aniStickerType,
+        };
+    }
+
+    return faceId < 260 ? { kind: 'classic' } : { kind: 'small' };
+}
+
+export class SysFaceStore {
+    private catalog: IndexedCatalog | null = null;
+    private storage: SysFaceCatalogStorage | null;
+    private readonly fetchCatalog: (sender: OidbSender) => Promise<SysFacePackEntry[]>;
+    private readonly now: () => number;
+    private readonly fetchFace: NonNullable<SysFaceStoreOptions['fetchFace']>;
+    private cacheLoad: Promise<void> | null = null;
+    private refreshInflight: Promise<SysFacePackEntry[]> | null = null;
+    private refreshedInProcess = false;
+    private prewarmTask: Promise<void> | null = null;
+
+    constructor(options: SysFaceStoreOptions = {}) {
+        this.storage = options.storage ?? null;
+        this.fetchCatalog = options.fetchCatalog ?? ((sender) => FetchSysFaces.invoke(sender));
+        this.now = options.now ?? Date.now;
+        this.fetchFace =
+            options.fetchFace ?? ((sender, faceId) => FetchSysFace.invoke(sender, { faceId }));
+    }
+
+    /** Configure persistence before the shared store has been used. */
+    configureStorage(storage: SysFaceCatalogStorage): void {
+        if (this.cacheLoad || this.catalog || this.refreshInflight) {
+            throw new Error('system face catalog storage must be configured before first use');
+        }
+
+        this.storage = storage;
+    }
+
+    /** Index a trusted catalog. Kept public for protocol consumers that already
+     * obtained a full catalog and want to reuse the same query/send semantics. */
+    load(packs: SysFacePackEntry[]): void {
+        this.catalog = indexCatalog(validateCatalog(packs));
+    }
+
+    lookup(faceId: number): SysFaceEntry | null {
+        const lookup = this.catalog?.lookups.get(faceId);
+        return (
+            this.catalog?.byId.get(String(faceId)) ??
+            (lookup && 'entry' in lookup ? lookup.entry : null)
+        );
+    }
+
+    /** Case-insensitive query over id, description, aliases, and pack name. */
+    search(query: string): SysFaceEntry[] {
+        const needle = query.trim().toLocaleLowerCase();
+
+        if (!needle || !this.catalog) {
+            return [];
+        }
+
+        const matches: SysFaceEntry[] = [];
+        const matchedIds = new Set<string>();
+
+        for (const pack of this.catalog.packs) {
+            for (const face of pack.emojis) {
+                if (matchedIds.has(face.qSid)) {
+                    continue;
+                }
+
+                const haystacks = [
+                    face.qSid,
+                    face.qDes,
+                    face.emCode,
+                    pack.packName,
+                    ...face.emojiNameAlias,
+                ];
+
+                if (haystacks.some((value) => value.toLocaleLowerCase().includes(needle))) {
+                    const canonical = this.catalog.byId.get(face.qSid);
+
+                    if (!canonical) {
+                        throw new Error(`system face index is missing catalog id ${face.qSid}`);
+                    }
+
+                    matches.push(canonical);
+                    matchedIds.add(face.qSid);
+                }
+            }
+        }
+
+        return matches;
+    }
+
+    /** Synchronous classification, including IDs no longer listed in a panel. */
+    classify(faceId: number): FaceWire {
+        return faceWireFor(this.lookup(faceId), faceId);
+    }
+
+    /** Load durable state, fetching only when no usable catalog exists. */
+    async ensureReady(sender: OidbSender): Promise<void> {
+        await (this.refreshInflight ?? this.loadCache());
+
+        if (this.refreshInflight || !this.catalog) {
+            await this.refresh(sender);
+        }
+    }
+
+    /** Restore once, then refresh from the first logged-in account. */
+    prewarm(sender: OidbSender): Promise<void> {
+        return (this.prewarmTask ??= (async () => {
+            try {
+                await this.loadCache();
+            } catch {
+                // The failed restore is logged; the server refresh repairs the cache.
+            }
+
+            await this.refresh(sender);
+        })().catch((error) => {
+            this.prewarmTask = null;
+            throw error;
+        }));
+    }
+
+    /** Fetch the current authoritative catalog. Concurrent callers share one
+     * request and one atomic persistence operation. */
+    refresh(sender: OidbSender): Promise<SysFacePackEntry[]> {
+        if (this.refreshInflight) {
+            return this.refreshInflight;
+        }
+
+        const startedAt = this.now();
+        this.refreshInflight = this.fetchCatalog(sender)
+            .then(async (packs) => {
+                const validated = validateCatalog(packs);
+                const snapshot: SysFaceCatalogSnapshot = {
+                    schemaVersion: 1,
+                    fetchedAt: this.now(),
+                    packs: validated,
+                };
+                const catalog = indexCatalog(validated);
+                this.catalog = catalog;
+                this.refreshedInProcess = true;
+
+                if (this.storage) {
+                    await this.storage.save(snapshot);
+                }
+
+                log.info(
+                    'system face catalog refreshed: entries=%d uniqueFaces=%d overlaps=%d packs=%d elapsedMs=%d',
+                    catalog.entryCount,
+                    catalog.byId.size,
+                    catalog.overlapCount,
+                    validated.length,
+                    this.now() - startedAt,
+                );
+                return validated;
+            })
+            .catch((error) => {
+                log.error(
+                    'system face catalog refresh failed: elapsedMs=%d error=%s',
+                    this.now() - startedAt,
+                    errorMessage(error),
+                );
+                throw error;
+            })
+            .finally(() => {
+                this.refreshInflight = null;
+            });
+        return this.refreshInflight;
+    }
+
+    /** Panel membership does not determine whether a face can be animated. */
+    async resolve(sender: OidbSender, faceId: number): Promise<SysFaceEntry | null> {
+        await this.ensureReady(sender);
+        let cached = this.lookup(faceId);
+
+        if (cached) {
+            return cached;
+        }
+
+        if (!this.refreshedInProcess) {
+            await this.refresh(sender);
+            cached = this.lookup(faceId);
+
+            if (cached) {
+                return cached;
+            }
+        }
+
+        const catalog = this.catalog;
+
+        if (!catalog) {
+            throw new Error('system face catalog is unavailable after readiness completed');
+        }
+
+        const lookup = catalog.lookups.get(faceId);
+
+        if (lookup && 'entry' in lookup) {
+            return lookup.entry;
+        }
+
+        const request =
+            lookup?.promise ??
+            this.fetchSingleFace(sender, faceId)
+                .then((entry) => {
+                    catalog.lookups.set(faceId, { entry });
+                    return entry;
+                })
+                .catch((error) => {
+                    catalog.lookups.delete(faceId);
+                    throw error;
+                });
+        catalog.lookups.set(faceId, { promise: request });
+
+        try {
+            const entry = await request;
+
+            if (this.catalog === catalog) {
+                return entry;
+            }
+        } catch (error) {
+            if (this.catalog === catalog) {
+                throw error;
+            }
+        }
+
+        // A replacement catalog owns its own lookups; callers follow the current one.
+        return this.resolve(sender, faceId);
+    }
+
+    private async fetchSingleFace(
+        sender: OidbSender,
+        faceId: number,
+    ): Promise<SysFaceEntry | null> {
+        try {
+            const entry = await this.fetchFace(sender, faceId);
+
+            if (entry) {
+                if (entry.qSid !== String(faceId)) {
+                    throw new Error(
+                        `system face lookup id mismatch: requested=${faceId} received=${entry.qSid}`,
+                    );
+                }
+
+                validateCatalog([{ packName: '', emojis: [entry] }]);
+                faceWireFor(entry, faceId);
+            }
+
+            log.debug(
+                'system face lookup completed: id=%d found=%s animated=%s',
+                faceId,
+                entry !== null,
+                entry !== null && isSuperFaceEntry(entry),
+            );
+            return entry;
+        } catch (error) {
+            log.error('system face lookup failed: id=%d error=%s', faceId, errorMessage(error));
+            throw error;
+        }
+    }
+
+    async resolveWire(sender: OidbSender, faceId: number): Promise<FaceWire> {
+        const entry = await this.resolve(sender, faceId);
+
+        if (!entry) {
+            log.debug(
+                'system face id %d has no metadata after lookup; sending its small representation',
+                faceId,
+            );
+        }
+
+        return faceWireFor(entry, faceId);
+    }
+
+    async getCatalog(sender: OidbSender, refresh = false): Promise<SysFacePackEntry[]> {
+        if (refresh) {
+            await this.refresh(sender);
+        } else {
+            await this.ensureReady(sender);
+        }
+
+        if (!this.catalog) {
+            throw new Error('system face catalog is unavailable after readiness completed');
+        }
+
+        return this.catalog.packs;
+    }
+
+    private loadCache(): Promise<void> {
+        if (this.catalog) {
+            return Promise.resolve();
+        }
+
+        return (this.cacheLoad ??= this.restoreCache());
+    }
+
+    private async restoreCache(): Promise<void> {
+        if (!this.storage) {
+            return;
+        }
+
+        const startedAt = this.now();
+
+        try {
+            const snapshot = await this.storage.load();
+
+            // A newer load or refresh supersedes this disk read.
+            if (this.catalog || !snapshot) {
+                return;
+            }
+
+            validateSnapshot(snapshot);
+            const catalog = indexCatalog(snapshot.packs);
+            this.catalog = catalog;
+            log.info(
+                'system face catalog restored: entries=%d uniqueFaces=%d overlaps=%d packs=%d ' +
+                    'fetchedAt=%d elapsedMs=%d',
+                catalog.entryCount,
+                catalog.byId.size,
+                catalog.overlapCount,
+                snapshot.packs.length,
+                snapshot.fetchedAt,
+                this.now() - startedAt,
+            );
+        } catch (error) {
+            if (this.catalog) {
+                return;
+            }
+
+            log.error(
+                'system face catalog restore failed: elapsedMs=%d error=%s',
+                this.now() - startedAt,
+                errorMessage(error),
+            );
+            throw error;
+        }
+    }
+}
+
+function validateSnapshot(snapshot: SysFaceCatalogSnapshot): void {
+    if (typeof snapshot !== 'object' || snapshot === null) {
+        throw new Error('invalid system face catalog snapshot root');
+    }
+
+    if (snapshot.schemaVersion !== 1) {
+        throw new Error(
+            `unsupported system face catalog schema version: ${String(snapshot.schemaVersion)}`,
+        );
+    }
+
+    if (!Number.isSafeInteger(snapshot.fetchedAt) || snapshot.fetchedAt < 0) {
+        throw new Error(`invalid system face catalog fetchedAt: ${String(snapshot.fetchedAt)}`);
+    }
+
+    validateCatalog(snapshot.packs);
+}
+
+function validateCatalog(packs: SysFacePackEntry[]): SysFacePackEntry[] {
+    if (!Array.isArray(packs) || packs.length === 0) {
+        throw new Error('system face catalog is empty');
+    }
+
+    const seen = new Map<
+        string,
+        {
+            face: SysFaceEntry;
+            packIndex: number;
+            faceIndex: number;
+            faceIndexByPack: Map<number, number>;
+        }
+    >();
+    let faceCount = 0;
+
+    for (const [packIndex, pack] of packs.entries()) {
+        if (!pack || typeof pack.packName !== 'string' || !Array.isArray(pack.emojis)) {
+            throw new Error(`invalid system face pack at index ${packIndex}`);
+        }
+
+        for (const [faceIndex, face] of pack.emojis.entries()) {
+            if (!face || typeof face.qSid !== 'string' || face.qSid.length === 0) {
+                throw new Error(
+                    `invalid system face id at pack ${packIndex}, face ${faceIndex}: ` +
+                        `value=${JSON.stringify(face?.qSid)}`,
+                );
+            }
+
+            if (
+                !Array.isArray(face.emojiNameAlias) ||
+                face.emojiNameAlias.some((alias) => typeof alias !== 'string')
+            ) {
+                throw new Error(`invalid aliases for system face id ${face.qSid}`);
+            }
+
+            if (typeof face.qDes !== 'string' || typeof face.emCode !== 'string') {
+                throw new Error(`invalid text metadata for system face id ${face.qSid}`);
+            }
+
+            for (const [name, value] of [
+                ['qCid', face.qCid],
+                ['aniStickerType', face.aniStickerType],
+                ['aniStickerPackId', face.aniStickerPackId],
+                ['aniStickerId', face.aniStickerId],
+                ['aniStickerWidth', face.aniStickerWidth],
+                ['aniStickerHeight', face.aniStickerHeight],
+            ] as const) {
+                if (value !== null && !Number.isSafeInteger(value)) {
+                    throw new Error(`invalid ${name} for system face id ${face.qSid}`);
+                }
+            }
+
+            if (face.url !== null && typeof face.url !== 'string') {
+                throw new Error(`invalid url for system face id ${face.qSid}`);
+            }
+
+            const previous = seen.get(face.qSid);
+
+            if (previous) {
+                const previousFaceIndex = previous.faceIndexByPack.get(packIndex);
+
+                if (previousFaceIndex !== undefined) {
+                    throw new Error(
+                        `duplicate system face id ${face.qSid} within pack ${packIndex}: ` +
+                            `faces ${previousFaceIndex} and ${faceIndex}`,
+                    );
+                }
+
+                if (!hasCompatibleSendMetadata(previous.face, face)) {
+                    throw new Error(
+                        `conflicting system face send metadata for id ${face.qSid}: ` +
+                            `pack ${previous.packIndex}, face ${previous.faceIndex} vs ` +
+                            `pack ${packIndex}, face ${faceIndex}`,
+                    );
+                }
+
+                previous.faceIndexByPack.set(packIndex, faceIndex);
+            } else {
+                seen.set(face.qSid, {
+                    face,
+                    packIndex,
+                    faceIndex,
+                    faceIndexByPack: new Map([[packIndex, faceIndex]]),
+                });
+            }
+
+            faceCount += 1;
+        }
+    }
+
+    if (faceCount === 0) {
+        throw new Error('system face catalog contains no faces');
+    }
+
+    return packs;
+}
+
+function hasCompatibleSendMetadata(left: SysFaceEntry, right: SysFaceEntry): boolean {
+    if (!isAddressableFaceId(left.qSid)) {
+        return true;
+    }
+
+    const leftIsSuper = isSuperFaceEntry(left);
+    const rightIsSuper = isSuperFaceEntry(right);
+
+    if (leftIsSuper !== rightIsSuper) {
+        return false;
+    }
+
+    if (!leftIsSuper) {
+        return true;
+    }
+
+    return (
+        left.aniStickerType === right.aniStickerType &&
+        left.aniStickerPackId === right.aniStickerPackId &&
+        left.aniStickerId === right.aniStickerId
+    );
+}
+
+function isAddressableFaceId(id: string): boolean {
+    if (!/^(?:0|[1-9]\d*)$/.test(id)) {
+        return false;
+    }
+
+    const numeric = Number(id);
+    return Number.isSafeInteger(numeric) && numeric >= 0;
+}
+
+function indexCatalog(packs: SysFacePackEntry[]): IndexedCatalog {
+    const byId = new Map<string, SysFaceEntry>();
+    let entryCount = 0;
+
+    for (const pack of packs) {
+        for (const emoji of pack.emojis) {
+            entryCount += 1;
+
+            if (!byId.has(emoji.qSid)) {
+                byId.set(emoji.qSid, emoji);
+            }
+        }
+    }
+
+    return {
+        packs,
+        byId,
+        entryCount,
+        overlapCount: entryCount - byId.size,
+        lookups: new Map(),
+    };
+}
+
+/** Shared, process-wide catalog (the face set is account-independent). */
+export const sysFaceStore = new SysFaceStore();

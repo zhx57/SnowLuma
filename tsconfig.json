@@ -1,0 +1,11 @@
+{
+  "// description": "Monorepo root TS project. Has no sources of its own; each workspace package owns a real tsconfig.",
+  "extends": "./tsconfig.base.json",
+  "files": [],
+  "include": [],
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/sdk" },
+    { "path": "./packages/webui" }
+  ]
+}

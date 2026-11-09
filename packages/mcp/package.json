@@ -1,0 +1,65 @@
+{
+  "license": "SEE LICENSE IN LICENSE",
+  "name": "@snowluma/mcp",
+  "version": "2.3.3",
+  "description": "MCP server exposing the SnowLuma OneBot action catalog (docs + JSON Schemas) and optional execution to LLM clients.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SnowLuma/SnowLuma.git",
+    "directory": "packages/mcp"
+  },
+  "homepage": "https://github.com/SnowLuma/SnowLuma#readme",
+  "bugs": {
+    "url": "https://github.com/SnowLuma/SnowLuma/issues"
+  },
+  "type": "module",
+  "bin": {
+    "snowluma-mcp": "./dist/server.js"
+  },
+  "main": "./dist/server.js",
+  "types": "./dist/server.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "AGENT_FEATURES.md"
+  ],
+  "scripts": {
+    "clean": "node -e \"const fs=require('node:fs');fs.rmSync('dist',{recursive:true,force:true})\"",
+    "gen": "vitest run scripts/gen-catalog.test.ts",
+    "prebuild": "pnpm run clean && pnpm run gen",
+    "build": "tsc -p tsconfig.json && node scripts/build-message-app.mjs",
+    "prepack": "pnpm run build",
+    "typecheck": "tsc --noEmit && tsc -p apps/tsconfig.json",
+    "test": "vitest run",
+    "start": "node dist/server.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "onebot",
+    "snowluma",
+    "qq"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.3.1",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.3.1",
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "@snowluma/onebot": "workspace:*",
+    "@snowluma/proton": "workspace:*",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "4.1.12",
+    "@types/ws": "^8.18.1",
+    "@modelcontextprotocol/ext-apps": "^2.0.3"
+  },
+  "engines": {
+    "node": "^24.22.1 || >=26.12.1"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

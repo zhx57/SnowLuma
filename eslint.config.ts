@@ -1,0 +1,109 @@
+import js from '@eslint/js';
+import eslintConfigPrettier from 'eslint-config-prettier/flat';
+import reactHooks from 'eslint-plugin-react-hooks';
+import reactRefresh from 'eslint-plugin-react-refresh';
+import { defineConfig, globalIgnores } from 'eslint/config';
+import globals from 'globals';
+import tseslint from 'typescript-eslint';
+
+const tsconfigRootDir = import.meta.dirname;
+
+export const sourceIgnores = globalIgnores([
+    '**/dist/**',
+    '**/node_modules/**',
+    '**/coverage/**',
+    '**/.turbo/**',
+    '**/.vite/**',
+    '.claude/**',
+    'dev/**',
+    '**/*.tsbuildinfo',
+    '**/test/fixtures/**',
+    'packages/runtime/native/**',
+    'packages/mcp/src/generated/**',
+]);
+
+export default defineConfig([
+    sourceIgnores,
+    {
+        files: ['**/*.{js,mjs,cjs,ts,tsx}'],
+        extends: [js.configs.recommended],
+        languageOptions: {
+            ecmaVersion: 2023,
+            sourceType: 'module',
+            globals: {
+                ...globals.es2023,
+                ...globals.node,
+            },
+        },
+        rules: {
+            'no-unused-vars': 'off',
+            'no-useless-assignment': 'off',
+            'prefer-const': 'off',
+            'preserve-caught-error': 'off',
+        },
+    },
+    {
+        files: ['**/*.{ts,tsx}'],
+        extends: [tseslint.configs.recommended],
+        languageOptions: {
+            parserOptions: {
+                tsconfigRootDir,
+            },
+        },
+        rules: {
+            'prefer-const': 'off',
+            '@typescript-eslint/no-explicit-any': 'error',
+            '@typescript-eslint/no-empty-object-type': 'off',
+            '@typescript-eslint/no-this-alias': 'off',
+            '@typescript-eslint/no-unused-vars': [
+                'warn',
+                {
+                    argsIgnorePattern: '^_',
+                    varsIgnorePattern: '^_',
+                    caughtErrorsIgnorePattern: '^_',
+                },
+            ],
+        },
+    },
+    {
+        files: ['**/tests/**/*.{ts,tsx}', '**/*.test.{ts,tsx}'],
+        rules: {
+            '@typescript-eslint/no-explicit-any': 'off',
+        },
+    },
+    {
+        files: ['**/bench/**/*.{ts,tsx}', 'packages/proton/test/**/*.{ts,tsx}'],
+        rules: {
+            '@typescript-eslint/no-explicit-any': 'off',
+        },
+    },
+    {
+        // OIDB service layer is namespace-per-cmd by design — the
+        // structural-typing contract (namespace IS the OidbCallSpec) and
+        // the file:cmd 1:1 mapping are the whole point. Disable the
+        // module-syntax preference here only.
+        files: [
+            'packages/protocol/src/oidb-services/**/*.ts',
+            'packages/protocol/tests/oidb-services/**/*.ts',
+        ],
+        rules: {
+            '@typescript-eslint/no-namespace': 'off',
+        },
+    },
+    {
+        files: ['packages/webui/src/**/*.{ts,tsx}', 'packages/ui/src/**/*.{ts,tsx}'],
+        extends: [reactHooks.configs.flat.recommended, reactRefresh.configs.vite],
+        languageOptions: {
+            globals: globals.browser,
+            parserOptions: {
+                tsconfigRootDir,
+            },
+        },
+        rules: {
+            'prefer-const': 'off',
+            'react-refresh/only-export-components': 'off',
+            'react-hooks/set-state-in-effect': 'off',
+        },
+    },
+    eslintConfigPrettier,
+]);

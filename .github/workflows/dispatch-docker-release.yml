@@ -1,0 +1,86 @@
+name: Re-dispatch Docker Release
+
+# Manual-only re-dispatcher for SnowLuma.Docker.Framework's docker-image.yml.
+#
+# The normal flow is automatic: release.yml's `dispatch-docker` job fires
+# after a tag-triggered release is published. This workflow exists for
+# rebuilding an existing release's Docker image without re-tagging — for
+# example after fixing the Dockerfile, rotating a Docker Hub credential,
+# or backfilling an older tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      snowluma_tag:
+        description: 'SnowLuma release tag to rebuild (e.g. v0.5.0)'
+        required: true
+      docker_image_override:
+        description: 'Override Docker image name (defaults to vars.DOCKER_IMAGE)'
+        required: false
+        default: ''
+      platforms_override:
+        description: 'Override platforms (defaults to vars.DOCKER_PLATFORMS or linux/amd64,linux/arm64)'
+        required: false
+        default: ''
+      ghcr_image_override:
+        description: 'Override GHCR image name (defaults to vars.GHCR_IMAGE, leave empty to skip GHCR)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    environment: SnowLuma
+    steps:
+      - name: Dispatch Docker rebuild
+        uses: actions/github-script@v8
+        env:
+          RELEASE_REPOSITORY: ${{ vars.DOCKER_RELEASE_REPOSITORY }}
+          DOCKER_IMAGE: ${{ vars.DOCKER_IMAGE }}
+          DOCKER_PLATFORMS: ${{ vars.DOCKER_PLATFORMS }}
+          DOCKER_WORKFLOW: ${{ vars.DOCKER_WORKFLOW }}
+          DOCKER_REF: ${{ vars.DOCKER_REF }}
+          SNOWLUMA_TAG: ${{ inputs.snowluma_tag }}
+          IMAGE_OVERRIDE: ${{ inputs.docker_image_override }}
+          PLATFORMS_OVERRIDE: ${{ inputs.platforms_override }}
+          GHCR_IMAGE: ${{ vars.GHCR_IMAGE }}
+          GHCR_OVERRIDE: ${{ inputs.ghcr_image_override }}
+        with:
+          github-token: ${{ secrets.SNOWLUMA_TOKEN }}
+          script: |
+            const target = process.env.RELEASE_REPOSITORY;
+            if (!target || !target.includes('/')) {
+              throw new Error('Set SnowLuma environment variable DOCKER_RELEASE_REPOSITORY to owner/repo.');
+            }
+
+            const tag = process.env.SNOWLUMA_TAG;
+            if (!tag) throw new Error('snowluma_tag input is required.');
+
+            const [owner, repo] = target.split('/');
+            const sourceRepo = context.repo.owner + '/' + context.repo.repo;
+            const image = process.env.IMAGE_OVERRIDE || process.env.DOCKER_IMAGE || 'motricseven7/snowluma';
+            const platforms = process.env.PLATFORMS_OVERRIDE || process.env.DOCKER_PLATFORMS || 'linux/amd64,linux/arm64';
+            const workflowId = process.env.DOCKER_WORKFLOW || 'docker-image.yml';
+            const ref = process.env.DOCKER_REF || 'main';
+            const ghcrImage = process.env.GHCR_OVERRIDE || process.env.GHCR_IMAGE || '';
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner,
+              repo,
+              workflow_id: workflowId,
+              ref,
+              inputs: {
+                image,
+                tag,
+                push: 'true',
+                platforms,
+                snowluma_tag: tag,
+                snowluma_repository: sourceRepo,
+                ghcr_image: ghcrImage,
+              },
+            });
+
+            core.info(`Re-dispatched ${workflowId}@${ref} on ${target} for SnowLuma release ${sourceRepo}@${tag} (image=${image}, ghcr_image=${ghcrImage}, platforms=${platforms}).`);

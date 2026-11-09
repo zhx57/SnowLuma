@@ -1,0 +1,150 @@
+name: Promote Dev to Main
+
+# `dev` is the working branch. `main` is a pointer to the same history, moved
+# only by this workflow. Merge commits from dev → main are what painted the
+# GitHub network graph; this job moves the `main` ref to `dev` instead.
+on:
+  push:
+    branches: [dev]
+    tags: ['chore.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promote-dev-to-main
+  cancel-in-progress: false
+
+jobs:
+  decide:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+      reason: ${{ steps.check.outputs.reason }}
+    steps:
+      - name: Decide whether to promote
+        id: check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_TYPE: ${{ github.ref_type }}
+          HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+          run='false'
+          reason=''
+
+          case "${EVENT_NAME}" in
+            workflow_dispatch)
+              run='true'
+              reason='Manual workflow_dispatch'
+              ;;
+            push)
+              if [ "${REF_TYPE}" = 'tag' ]; then
+                run='true'
+                reason="Tag push: ${REF}"
+              elif [ "${REF}" = 'refs/heads/dev' ]; then
+                msg="${HEAD_COMMIT_MSG:-}"
+                if printf '%s' "${msg}" | grep -qiE '^\[merge\]|^chore\(release\):'; then
+                  run='true'
+                  reason='Commit message prefix on dev ([merge] or chore(release):)'
+                else
+                  reason='Commit on dev without [merge] / chore(release): prefix'
+                fi
+              else
+                reason="Push event on unhandled ref: ${REF}"
+              fi
+              ;;
+            *)
+              reason="Unhandled event: ${EVENT_NAME}"
+              ;;
+          esac
+
+          {
+            echo "run=${run}"
+            echo "reason=${reason}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "## Promote decision"
+            echo
+            echo "| Key | Value |"
+            echo "| --- | --- |"
+            echo "| Event | \`${EVENT_NAME}\` |"
+            echo "| Ref | \`${REF}\` |"
+            echo "| Run | \`${run}\` |"
+            echo "| Reason | ${reason} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  promote:
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate GitHub App credentials
+        env:
+          APP_ID: ${{ secrets.SNOWLUMA_BOT_APP_ID }}
+          PRIVATE_KEY: ${{ secrets.SNOWLUMA_BOT_PRIVATE_KEY }}
+        run: |
+          if [ -z "${APP_ID}" ] || [ -z "${PRIVATE_KEY}" ]; then
+            echo 'Missing SNOWLUMA_BOT_APP_ID and/or SNOWLUMA_BOT_PRIVATE_KEY secrets.' >&2
+            echo 'Configure the same GitHub App used by the nnphook native PR flow.' >&2
+            exit 1
+          fi
+
+      - name: Mint GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.SNOWLUMA_BOT_APP_ID }}
+          private-key: ${{ secrets.SNOWLUMA_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: dev
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Point main at dev
+        env:
+          REASON: ${{ needs.decide.outputs.reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          git fetch origin dev main
+          dev_sha="$(git rev-parse origin/dev)"
+          main_sha="$(git rev-parse origin/main)"
+          dev_short="$(git rev-parse --short origin/dev)"
+          main_short="$(git rev-parse --short origin/main)"
+
+          if [ "${dev_sha}" = "${main_sha}" ]; then
+            echo "::notice::main already equals dev @ ${dev_short}; nothing to promote."
+            {
+              echo "main already equals dev @ ${dev_short}"
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          unique="$(git cherry origin/dev origin/main | awk '/^\+/ { print $2 }' || true)"
+          if [ -n "${unique}" ]; then
+            echo '::error::main has unique commits that dev does not. Cherry-pick them onto dev first.' >&2
+            git log --oneline --no-walk ${unique}
+            exit 1
+          fi
+
+          git push --force-with-lease="refs/heads/main:${main_sha}" origin "origin/dev:refs/heads/main"
+          echo "::notice::Updated main ${main_short} → dev@${dev_short}"
+          {
+            echo "## Promote"
+            echo
+            echo "| Key | Value |"
+            echo "| --- | --- |"
+            echo "| \`main\` was | \`${main_sha}\` |"
+            echo "| \`main\` now | \`dev\` @ \`${dev_sha}\` |"
+            echo "| Reason | ${REASON} |"
+            echo "| Workflow run | ${RUN_URL} |"
+          } >> "${GITHUB_STEP_SUMMARY}"

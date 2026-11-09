@@ -1,0 +1,71 @@
+{
+  "license": "SEE LICENSE IN LICENSE",
+  "name": "@snowluma/core",
+  "version": "2.3.3",
+  "description": "SnowLuma core - NTQQ packet sniffer with Node.js native addon",
+  "private": true,
+  "type": "module",
+  "main": "../../dist/index.mjs",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "../../dist/index.mjs"
+    },
+    "./bridge": {
+      "types": "./src/bridge/bridge.ts",
+      "default": "./src/bridge/bridge.ts"
+    },
+    "./bridge-interface": {
+      "types": "./src/bridge/bridge-interface.ts",
+      "default": "./src/bridge/bridge-interface.ts"
+    },
+    "./bridge-context": {
+      "types": "./src/bridge/bridge-context.ts",
+      "default": "./src/bridge/bridge-context.ts"
+    },
+    "./manager": {
+      "types": "./src/bridge/manager.ts",
+      "default": "./src/bridge/manager.ts"
+    },
+    "./apis": {
+      "types": "./src/bridge/apis/index.ts",
+      "default": "./src/bridge/apis/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "vite build",
+    "build:all": "cross-env BUILD_WEBUI=true pnpm build",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@snowluma/bridge": "workspace:*",
+    "@snowluma/common": "workspace:*",
+    "@snowluma/onebot": "workspace:*",
+    "@snowluma/proto-defs": "workspace:*",
+    "@snowluma/protocol": "workspace:*",
+    "@snowluma/proton": "workspace:*",
+    "@snowluma/websocket": "workspace:*",
+    "fflate": "^0.8.3",
+    "otpauth": "^9.5.1",
+    "tar": "^7.5.22"
+  },
+  "devDependencies": {
+    "@hono/node-server": "^1.19.15",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@types/node": "catalog:",
+    "cross-env": "^10.1.0",
+    "hono": "^4.13.11",
+    "tsx": "^4.21.0",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vite-plugin-cp": "^6.0.3",
+    "vitest": "4.1.12",
+    "@snowluma/sqlite": "workspace:*"
+  },
+  "engines": {
+    "node": "^24.22.1 || >=26.12.1"
+  }
+}

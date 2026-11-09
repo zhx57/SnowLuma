@@ -1,0 +1,80 @@
+import { protobuf_decode } from '@snowluma/proton';
+import type { GroupInviteEvent } from '../../events';
+import type { GroupInvitation, GroupInvite, GroupJoin } from '@snowluma/proto-defs/notify';
+import { resolveUidToUin } from '../helpers';
+import type { MsgPushDecoder } from '../registry';
+
+export const decodeGroupJoinRequest: MsgPushDecoder = (ctx) => {
+    const join = protobuf_decode<GroupJoin>(ctx.content);
+
+    if (!join) {
+        return [];
+    }
+
+    const ev: GroupInviteEvent = {
+        kind: 'group_invite',
+        time: ctx.head.timestamp,
+        selfUin: ctx.selfUin,
+        groupId: join.groupUin ?? 0,
+        // Strangers stay unresolved here. Pipeline fills UIN via Identity.resolveUin.
+        fromUin: resolveUidToUin(ctx.identity, join.groupUin ?? 0, join.targetUid ?? ''),
+        fromUid: join.targetUid ?? '',
+        subType: 'add',
+        message: '',
+        // Legacy flag: the approval path can resolve it from the request inbox
+        // even when the pipeline cannot find a pending request to enrich from.
+        flag: `add:${join.groupUin ?? 0}:${join.targetUid ?? ''}`,
+    };
+    return [ev];
+};
+
+export const decodeGroupInvitation: MsgPushDecoder = (ctx) => {
+    const invitation = protobuf_decode<GroupInvitation>(ctx.content);
+
+    if (invitation?.cmd !== 87 || !invitation.info?.inner) {
+        return [];
+    }
+
+    const inner = invitation.info.inner;
+    const ev: GroupInviteEvent = {
+        kind: 'group_invite',
+        time: ctx.head.timestamp,
+        selfUin: ctx.selfUin,
+        groupId: inner.groupUin ?? 0,
+        fromUin: resolveUidToUin(ctx.identity, inner.groupUin ?? 0, inner.invitorUid ?? ''),
+        fromUid: inner.invitorUid ?? '',
+        invitedUin: resolveUidToUin(ctx.identity, inner.groupUin ?? 0, inner.targetUid ?? ''),
+        invitedUid: inner.targetUid ?? '',
+        subType: 'invite',
+        message: '',
+        // Self-invite notices never carry the approval msgseq, and they are
+        // absent from the UIN-based request inbox -- but the UID-based one used
+        // by `set_group_add_request` legacy parsing does return them. Ship the
+        // legacy flag so the event stays actionable (#125).
+        flag: `invite:${inner.groupUin ?? 0}:${inner.invitorUid ?? ''}`,
+    };
+    return [ev];
+};
+
+export const decodeGroupInvite: MsgPushDecoder = (ctx) => {
+    const invite = protobuf_decode<GroupInvite>(ctx.content);
+
+    if (!invite) {
+        return [];
+    }
+
+    const ev: GroupInviteEvent = {
+        kind: 'group_invite',
+        time: ctx.head.timestamp,
+        selfUin: ctx.selfUin,
+        groupId: invite.groupUin ?? 0,
+        fromUin: resolveUidToUin(ctx.identity, invite.groupUin ?? 0, invite.invitorUid ?? ''),
+        fromUid: invite.invitorUid ?? '',
+        invitedUin: ctx.selfUin,
+        subType: 'invite',
+        message: '',
+        // See decodeGroupInvitation: keep the event actionable without the card.
+        flag: `invite:${invite.groupUin ?? 0}:${invite.invitorUid ?? ''}`,
+    };
+    return [ev];
+};

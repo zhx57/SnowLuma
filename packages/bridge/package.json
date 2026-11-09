@@ -1,0 +1,69 @@
+{
+  "license": "SEE LICENSE IN LICENSE",
+  "name": "@snowluma/bridge",
+  "version": "2.3.3",
+  "private": true,
+  "type": "module",
+  "description": "SnowLuma bridge — QQ NT desktop client lifecycle: hook injection (via native addon), per-PID HookSession orchestration, pipe-watcher for process discovery, and the BridgeManagerSink interface that lets the hook layer call back into a UIN-keyed session router without depending on @snowluma/core. Consumed by the top-level app entry (which constructs the BridgeManager from @snowluma/core and injects it as the sink) and by the WebUI server (read-only HookProcessInfo views).",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./hook-manager": {
+      "types": "./src/hook-manager.ts",
+      "default": "./src/hook-manager.ts"
+    },
+    "./hook-session": {
+      "types": "./src/hook-session.ts",
+      "default": "./src/hook-session.ts"
+    },
+    "./hook-packet-client": {
+      "types": "./src/hook-packet-client.ts",
+      "default": "./src/hook-packet-client.ts"
+    },
+    "./packet-timeout": {
+      "types": "./src/packet-timeout.ts",
+      "default": "./src/packet-timeout.ts"
+    },
+    "./injector": {
+      "types": "./src/injector.ts",
+      "default": "./src/injector.ts"
+    },
+    "./pipe-watcher": {
+      "types": "./src/pipe-watcher.ts",
+      "default": "./src/pipe-watcher.ts"
+    },
+    "./qq-hook-client": {
+      "types": "./src/qq-hook-client.ts",
+      "default": "./src/qq-hook-client.ts"
+    },
+    "./qq-account": {
+      "types": "./src/qq-account/index.ts",
+      "default": "./src/qq-account/index.ts"
+    },
+    "./types": {
+      "types": "./src/types.ts",
+      "default": "./src/types.ts"
+    }
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@snowluma/common": "workspace:*",
+    "@snowluma/sqlite": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "4.1.12"
+  },
+  "engines": {
+    "node": "^24.22.1 || >=26.12.1"
+  }
+}

@@ -1,0 +1,410 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { BridgeInterface } from '@snowluma/core/bridge-interface';
+import { ApiHandler, type ApiActionContext } from '../src/api-handler';
+import { actions } from '../src/actions/qzone';
+
+function makeHandler(qzone: Record<string, unknown>): ApiHandler {
+    const bridge = { apis: { qzone } } as unknown as BridgeInterface;
+    const ctx = { bridge } as ApiActionContext;
+    return new ApiHandler(ctx);
+}
+
+describe('qzone actions', () => {
+    it.each([undefined, '20002'])(
+        'get_qzone_profile returns the requested profile and normalizes owner %s',
+        async (targetUin) => {
+            const profile = { name: 'My space', description: 'Notes' };
+            const getProfile = vi.fn().mockResolvedValue(profile);
+            const params = targetUin === undefined ? {} : { target_uin: targetUin };
+
+            expect(
+                await makeHandler({ getProfile }).handle('get_qzone_profile', params),
+            ).toMatchObject({
+                status: 'ok',
+                retcode: 0,
+                data: profile,
+            });
+            expect(getProfile).toHaveBeenCalledWith(targetUin === undefined ? undefined : 20002);
+        },
+    );
+
+    it.each([0, 'bad'])(
+        'get_qzone_profile rejects invalid owners before fetching (%s)',
+        async (targetUin) => {
+            const getProfile = vi.fn();
+
+            expect(
+                await makeHandler({ getProfile }).handle('get_qzone_profile', {
+                    target_uin: targetUin,
+                }),
+            ).toMatchObject({
+                status: 'failed',
+                retcode: 1400,
+            });
+            expect(getProfile).not.toHaveBeenCalled();
+        },
+    );
+
+    it.each(['get_qzone_profile', 'set_qzone_profile'])(
+        '%s exposes upstream errors',
+        async (action) => {
+            const failure = new Error('qzone profile failed: code=-3000 need login');
+            const method = vi.fn().mockRejectedValue(failure);
+            const handler = makeHandler({ getProfile: method, setProfile: method });
+            const params = action === 'set_qzone_profile' ? { name: 'New name' } : {};
+            const response = await handler.handle(action, params);
+
+            expect(response).toMatchObject({ status: 'failed', retcode: 100 });
+            expect(response.wording).toContain('code=-3000 need login');
+        },
+    );
+
+    it.each([{ name: 'New name' }, { description: '' }, { name: '', description: 'New notes' }])(
+        'set_qzone_profile forwards supplied fields and preserves explicit empty values (%j)',
+        async (params) => {
+            const setProfile = vi.fn().mockResolvedValue(undefined);
+
+            expect(
+                await makeHandler({ setProfile }).handle('set_qzone_profile', params),
+            ).toMatchObject({
+                status: 'ok',
+                retcode: 0,
+                data: null,
+            });
+            expect(setProfile).toHaveBeenCalledWith({
+                name: params.name,
+                description: params.description,
+            });
+        },
+    );
+
+    it.each([{}, { target_uin: 20002 }, { name: {} }, { description: [] }])(
+        'set_qzone_profile rejects missing or invalid updates before writing (%j)',
+        async (params) => {
+            const setProfile = vi.fn();
+
+            expect(
+                await makeHandler({ setProfile }).handle('set_qzone_profile', params),
+            ).toMatchObject({
+                status: 'failed',
+                retcode: 1400,
+            });
+            expect(setProfile).not.toHaveBeenCalled();
+        },
+    );
+
+    it('set_qzone_profile cannot select a different account', async () => {
+        const setProfile = vi.fn().mockResolvedValue(undefined);
+
+        await makeHandler({ setProfile }).handle('set_qzone_profile', {
+            name: 'New name',
+            target_uin: 20002,
+        });
+        expect(setProfile).toHaveBeenCalledWith({ name: 'New name', description: undefined });
+    });
+
+    it('classifies profile reads and writes separately', () => {
+        expect(
+            actions.find((action) => action.names.includes('get_qzone_profile'))?.describe()
+                .readOnly,
+        ).toBe(true);
+        expect(
+            actions.find((action) => action.names.includes('set_qzone_profile'))?.describe()
+                .readOnly,
+        ).toBe(false);
+    });
+
+    it('get_qzone_feeds retains defaults and forwards optional continuation without stripping result fields', async () => {
+        const result = { feeds: [], has_more: true, next_cursor: 'next' };
+        const getFeeds = vi.fn().mockResolvedValue(result);
+        const handler = makeHandler({ getFeeds });
+        expect(await handler.handle('get_qzone_feeds', {})).toMatchObject({
+            status: 'ok',
+            data: result,
+        });
+        expect(getFeeds).toHaveBeenLastCalledWith(1, 10, undefined);
+        await handler.handle('get_qzone_feeds', { cursor: 'opaque-cursor', count: '20' });
+        expect(getFeeds).toHaveBeenLastCalledWith(1, 20, 'opaque-cursor');
+        expect(
+            actions.find((action) => action.names.includes('get_qzone_feeds'))?.describe().readOnly,
+        ).toBe(true);
+    });
+
+    it.each([{ cursor: '' }, { cursor: 'a'.repeat(65537) }, { count: 51 }, { page_num: 0 }])(
+        'get_qzone_feeds rejects invalid pagination before calling the bridge',
+        async (params) => {
+            const getFeeds = vi.fn();
+            expect(await makeHandler({ getFeeds }).handle('get_qzone_feeds', params)).toMatchObject(
+                { status: 'failed', retcode: 1400 },
+            );
+            expect(getFeeds).not.toHaveBeenCalled();
+        },
+    );
+
+    it('get_qzone_feeds exposes continuation failures to callers', async () => {
+        const getFeeds = vi.fn().mockRejectedValue(new Error('pagination did not advance'));
+        expect(
+            await makeHandler({ getFeeds }).handle('get_qzone_feeds', { cursor: 'opaque' }),
+        ).toMatchObject({ status: 'failed', wording: 'pagination did not advance' });
+    });
+
+    it('get_qzone_msg_detail returns the comment page with default parameters', async () => {
+        const detail = {
+            tid: 'T1',
+            content: 'Post',
+            comment_num: 1,
+            comments: [
+                {
+                    uin: 20002,
+                    name: 'Reader',
+                    time: 1700000000,
+                    content: 'Hello',
+                    comment_id: '0',
+                    replies: [],
+                },
+            ],
+        };
+        const getMsgDetail = vi.fn().mockResolvedValue(detail);
+        const res = await makeHandler({ getMsgDetail }).handle('get_qzone_msg_detail', {
+            tid: 'T1',
+        });
+        expect(res).toMatchObject({ status: 'ok', retcode: 0, data: detail });
+        expect(getMsgDetail).toHaveBeenCalledWith('T1', undefined, 0, 20);
+        expect(
+            actions.find((action) => action.names.includes('get_qzone_msg_detail'))?.describe()
+                .readOnly,
+        ).toBe(true);
+    });
+
+    it('get_qzone_msg_detail accepts HTTP query strings for owner and pagination', async () => {
+        const getMsgDetail = vi
+            .fn()
+            .mockResolvedValue({ tid: 'T1', content: '', comment_num: 0, comments: [] });
+        const res = await makeHandler({ getMsgDetail }).handle('get_qzone_msg_detail', {
+            tid: 'T1',
+            target_uin: '20002',
+            pos: '5',
+            num: '10',
+        });
+        expect(res).toMatchObject({ status: 'ok', retcode: 0 });
+        expect(getMsgDetail).toHaveBeenCalledWith('T1', 20002, 5, 10);
+    });
+
+    it.each([
+        {},
+        { tid: '' },
+        { tid: 'T1', target_uin: 0 },
+        { tid: 'T1', target_uin: 'bad' },
+        { tid: 'T1', pos: -1 },
+        { tid: 'T1', num: 0 },
+        { tid: 'T1', num: 101 },
+    ])('get_qzone_msg_detail rejects invalid params (%j) before fetching', async (params) => {
+        const getMsgDetail = vi.fn();
+        const res = await makeHandler({ getMsgDetail }).handle('get_qzone_msg_detail', params);
+        expect(res).toMatchObject({ status: 'failed', retcode: 1400 });
+        expect(getMsgDetail).not.toHaveBeenCalled();
+    });
+
+    it('get_qzone_msg_detail exposes upstream failures', async () => {
+        const getMsgDetail = vi
+            .fn()
+            .mockRejectedValue(new Error('qzone msg detail failed: code=-3000 need login'));
+        const res = await makeHandler({ getMsgDetail }).handle('get_qzone_msg_detail', {
+            tid: 'T1',
+        });
+        expect(res).toMatchObject({ status: 'failed', retcode: 100 });
+        expect(res.wording).toContain('code=-3000 need login');
+    });
+
+    it('send_qzone_msg uploads images and publishes richvals joined with tab', async () => {
+        const uploadImageFromSource = vi
+            .fn()
+            .mockResolvedValueOnce({ richval: 'RV1', url: 'URL1' })
+            .mockResolvedValueOnce({ richval: 'RV2', url: 'URL2' });
+        const publish = vi.fn().mockResolvedValue({ tid: 'T1', time: 1 });
+        const handler = makeHandler({ uploadImageFromSource, publish });
+
+        const res = await handler.handle('send_qzone_msg', {
+            content: 'hello',
+            images: ['file:///a.jpg', 'file:///b.jpg'],
+        });
+
+        expect(res).toMatchObject({ status: 'ok', retcode: 0, data: { tid: 'T1', time: 1 } });
+        expect(uploadImageFromSource).toHaveBeenNthCalledWith(1, 'file:///a.jpg');
+        expect(uploadImageFromSource).toHaveBeenNthCalledWith(2, 'file:///b.jpg');
+        expect(publish).toHaveBeenCalledWith('hello', 1, 'RV1\tRV2', 1, undefined);
+    });
+
+    it('comment_qzone uploads images and comments direct urls joined with tab', async () => {
+        const uploadImageFromSource = vi
+            .fn()
+            .mockResolvedValueOnce({ richval: 'RV1', url: 'URL1' })
+            .mockResolvedValueOnce({ richval: 'RV2', url: 'URL2' });
+        const comment = vi.fn().mockResolvedValue({ comment_id: 'C1' });
+        const handler = makeHandler({ uploadImageFromSource, comment });
+
+        const res = await handler.handle('comment_qzone', {
+            tid: 'T1',
+            content: 'nice',
+            target_uin: 20002,
+            images: ['file:///a.jpg', 'file:///b.jpg'],
+        });
+
+        expect(res).toMatchObject({ status: 'ok', retcode: 0, data: { comment_id: 'C1' } });
+        expect(comment).toHaveBeenCalledWith('T1', 'nice', 20002, 1, 'URL1\tURL2');
+    });
+
+    it('comment_qzone replies within the selected parent without changing the post owner', async () => {
+        const result = { comment_id: '8', parent_comment_id: '0', parent_comment_uin: 30003 };
+        const comment = vi.fn().mockResolvedValue(result);
+        const res = await makeHandler({ comment }).handle('comment_qzone', {
+            tid: 'T1',
+            content: 'Reply',
+            target_uin: '20002',
+            comment_id: '0',
+            comment_uin: '30003',
+            reply_uin: '40004',
+            reply_name: 'Reader',
+        });
+
+        expect(res).toMatchObject({ status: 'ok', retcode: 0, data: result });
+        expect(comment).toHaveBeenCalledWith('T1', 'Reply', 20002, undefined, undefined, {
+            commentId: '0',
+            commentUin: '30003',
+            replyTo: { uin: '40004', name: 'Reader' },
+        });
+    });
+
+    it('accepts parent ID zero without a nested recipient and leaves ordinary text comments unchanged', async () => {
+        const comment = vi.fn().mockResolvedValue({ comment_id: '8' });
+        const handler = makeHandler({ comment });
+        await handler.handle('comment_qzone', {
+            tid: 'T1',
+            content: 'Reply',
+            comment_id: 0,
+            comment_uin: 30003,
+            images: [],
+        });
+        expect(comment).toHaveBeenNthCalledWith(1, 'T1', 'Reply', undefined, undefined, undefined, {
+            commentId: '0',
+            commentUin: '30003',
+        });
+        await handler.handle('comment_qzone', { tid: 'T1', content: 'Comment' });
+        expect(comment).toHaveBeenNthCalledWith(2, 'T1', 'Comment', undefined);
+    });
+
+    it('exposes reply failures without falling back to an ordinary comment', async () => {
+        const comment = vi
+            .fn()
+            .mockRejectedValue(new Error('qzone reply failed: code=-3000 denied'));
+        const res = await makeHandler({ comment }).handle('comment_qzone', {
+            tid: 'T1',
+            content: 'Reply',
+            comment_id: '0',
+            comment_uin: 30003,
+        });
+        expect(res).toMatchObject({ status: 'failed', retcode: 100 });
+        expect(res.wording).toContain('code=-3000 denied');
+        expect(comment).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+        { comment_id: '0' },
+        { comment_uin: 30003 },
+        { comment_id: '', comment_uin: 30003 },
+        { comment_id: ' ', comment_uin: 30003 },
+        { comment_id: '0', comment_uin: 0 },
+        { comment_id: '0', comment_uin: 30003, reply_uin: 40004 },
+        { comment_id: '0', comment_uin: 30003, reply_name: 'Reader' },
+        { comment_id: '0', comment_uin: 30003, reply_uin: 40004, reply_name: ' ' },
+        { reply_uin: 40004, reply_name: 'Reader' },
+        { comment_id: '0', comment_uin: 30003, images: ['file:///a.jpg'] },
+    ])('rejects invalid reply parameters before uploads or comments (%j)', async (params) => {
+        const comment = vi.fn();
+        const uploadImageFromSource = vi.fn();
+        const res = await makeHandler({ comment, uploadImageFromSource }).handle('comment_qzone', {
+            tid: 'T1',
+            content: 'Reply',
+            ...params,
+        });
+
+        expect(res).toMatchObject({ status: 'failed', retcode: 1400 });
+        expect(comment).not.toHaveBeenCalled();
+        expect(uploadImageFromSource).not.toHaveBeenCalled();
+    });
+
+    it('returns a clear error and skips publish when one image upload fails', async () => {
+        const uploadImageFromSource = vi
+            .fn()
+            .mockResolvedValueOnce({ richval: 'RV1', url: 'URL1' })
+            .mockRejectedValueOnce(new Error('network down'));
+        const publish = vi.fn();
+        const handler = makeHandler({ uploadImageFromSource, publish });
+
+        const res = await handler.handle('send_qzone_msg', {
+            content: 'hello',
+            images: ['file:///a.jpg', 'file:///b.jpg'],
+        });
+
+        expect(res).toMatchObject({ status: 'failed', retcode: 100 });
+        expect(res.wording).toContain('第 2 张图片上传失败: network down');
+        expect(publish).not.toHaveBeenCalled();
+    });
+
+    it('set_qzone_msg_right joins target_uins with | and passes through', async () => {
+        const updateRight = vi.fn().mockResolvedValue({ ugc_right: 16 });
+        const handler = makeHandler({ updateRight });
+
+        const res = await handler.handle('set_qzone_msg_right', {
+            tid: 'T1',
+            ugc_right: 16,
+            target_uins: [10001, 10002],
+        });
+
+        expect(res).toMatchObject({ status: 'ok', retcode: 0, data: { ugc_right: 16 } });
+        expect(updateRight).toHaveBeenCalledWith('T1', 16, '10001|10002');
+    });
+
+    it('set_qzone_msg_right rejects invalid ugc_right and 16/128 without target_uins', async () => {
+        const updateRight = vi.fn();
+        const handler = makeHandler({ updateRight });
+
+        const bad = await handler.handle('set_qzone_msg_right', { tid: 'T1', ugc_right: 2 });
+        expect(bad).toMatchObject({ status: 'failed' });
+
+        const missing = await handler.handle('set_qzone_msg_right', { tid: 'T1', ugc_right: 128 });
+        expect(missing).toMatchObject({ status: 'failed' });
+
+        expect(updateRight).not.toHaveBeenCalled();
+    });
+
+    it('set_qzone_ban with enable=true calls setBlack with ban=true', async () => {
+        const setBlack = vi.fn().mockResolvedValue(undefined);
+        const handler = makeHandler({ setBlack });
+
+        const res = await handler.handle('set_qzone_ban', { user_id: 12345, enable: true });
+
+        expect(res).toMatchObject({ status: 'ok', retcode: 0 });
+        expect(setBlack).toHaveBeenCalledWith(12345, true);
+    });
+
+    it('set_qzone_ban with enable=false calls setBlack with ban=false', async () => {
+        const setBlack = vi.fn().mockResolvedValue(undefined);
+        const handler = makeHandler({ setBlack });
+
+        const res = await handler.handle('set_qzone_ban', { user_id: 12345, enable: false });
+
+        expect(res).toMatchObject({ status: 'ok', retcode: 0 });
+        expect(setBlack).toHaveBeenCalledWith(12345, false);
+    });
+
+    it('set_qzone_ban defaults enable to true', async () => {
+        const setBlack = vi.fn().mockResolvedValue(undefined);
+        const handler = makeHandler({ setBlack });
+
+        const res = await handler.handle('set_qzone_ban', { user_id: 12345 });
+
+        expect(res).toMatchObject({ status: 'ok', retcode: 0 });
+        expect(setBlack).toHaveBeenCalledWith(12345, true);
+    });
+});
