@@ -1,0 +1,188 @@
+name: Publish Docker image to GHCR
+
+# Builds the all-in-one container (Linux QQ + Xvfb + VNC + SnowLuma) and
+# publishes it to ghcr.io/<owner>/snowluma.
+#
+# Triggers:
+#   - push a v* tag: publishes <tag>, <major>.<minor>, <major> and latest
+#   - manual dispatch: publishes the requested tag without touching a release
+#
+# The image is large because it ships Chromium-backed QQ, so it is built per
+# architecture on native runners rather than under QEMU.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag to publish (e.g. v2.3.3 or test)'
+        required: true
+        default: 'test'
+      also_latest:
+        description: 'Also move the latest tag'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tag
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          if [[ -z "${tag}" ]]; then
+            echo "empty image tag" >&2
+            exit 1
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Resolve platform suffix
+        id: plat
+        shell: bash
+        run: echo "suffix=$(echo '${{ matrix.platform }}' | tr '/' '-')" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: |
+            org.opencontainers.image.title=SnowLuma
+            org.opencontainers.image.description=All-in-one SnowLuma image with Linux QQ, Xvfb, VNC and noVNC
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.tag }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ steps.plat.outputs.suffix }}
+          cache-to: type=gha,mode=max,scope=${{ steps.plat.outputs.suffix }}
+
+      - name: Export digest
+        shell: bash
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ steps.plat.outputs.suffix }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v7
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image tag
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create multi-arch manifest
+        shell: bash
+        run: |
+          cd /tmp/digests
+          digest_args=()
+          for digest in *; do
+            digest_args+=("${REGISTRY}/${IMAGE_NAME}@sha256:${digest}")
+          done
+
+          tags=(-t "${REGISTRY}/${IMAGE_NAME}:${{ steps.meta.outputs.tag }}")
+
+          # Release tags get rolling aliases so users can pin a minor or major.
+          if [[ "${{ github.event_name }}" == "push" && "${{ steps.meta.outputs.tag }}" == v*.*.* ]]; then
+            version="${{ steps.meta.outputs.tag }}"
+            version="${version#v}"
+            major="${version%%.*}"
+            rest="${version#*.}"
+            minor="${rest%%.*}"
+            tags+=(-t "${REGISTRY}/${IMAGE_NAME}:${major}.${minor}")
+            tags+=(-t "${REGISTRY}/${IMAGE_NAME}:${major}")
+            tags+=(-t "${REGISTRY}/${IMAGE_NAME}:latest")
+          fi
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.also_latest }}" == "true" ]]; then
+            tags+=(-t "${REGISTRY}/${IMAGE_NAME}:latest")
+          fi
+
+          docker buildx imagetools create "${tags[@]}" "${digest_args[@]}"
+
+      - name: Inspect manifest
+        run: docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${{ steps.meta.outputs.tag }}"

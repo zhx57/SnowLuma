@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Container entrypoint: prepares the runtime user, VNC credentials and the
+# supervisor program list, then hands off to supervisord.
+set -euo pipefail
+
+SNOWLUMA_HOME="${SNOWLUMA_HOME:-/app}"
+SNOWLUMA_UID="${SNOWLUMA_UID:-1000}"
+SNOWLUMA_GID="${SNOWLUMA_GID:-1000}"
+SNOWLUMA_SCREEN="${SNOWLUMA_SCREEN:-1920x1080x24}"
+SNOWLUMA_QQ_FLAGS="${SNOWLUMA_QQ_FLAGS:---disable-gpu --disable-software-rasterizer --disable-gpu-compositing}"
+
+export SNOWLUMA_HOME SNOWLUMA_SCREEN SNOWLUMA_QQ_FLAGS
+export HOME="${SNOWLUMA_HOME}"
+export DISPLAY="${DISPLAY:-:1}"
+
+# --- runtime user ----------------------------------------------------------
+# The QQ process and SnowLuma must run as the same unprivileged user: the hook
+# addon ptrace-attaches to QQ, which the kernel rejects across UIDs.
+if ! getent group snowluma >/dev/null 2>&1; then
+  groupadd -g "${SNOWLUMA_GID}" snowluma
+fi
+
+if ! getent passwd snowluma >/dev/null 2>&1; then
+  useradd -u "${SNOWLUMA_UID}" -g "${SNOWLUMA_GID}" -M -d "${SNOWLUMA_HOME}" -s /bin/bash snowluma
+fi
+
+# Volumes are created by Docker as root; hand them to the runtime user so QQ
+# and SnowLuma can persist login state and configuration.
+for dir in "${SNOWLUMA_HOME}/data" "${SNOWLUMA_HOME}/.config" "${SNOWLUMA_HOME}/.local" "${SNOWLUMA_HOME}/.local/share"; do
+  mkdir -p "${dir}"
+done
+chown -R "${SNOWLUMA_UID}:${SNOWLUMA_GID}" \
+  "${SNOWLUMA_HOME}/data" \
+  "${SNOWLUMA_HOME}/.config" \
+  "${SNOWLUMA_HOME}/.local"
+
+# --- VNC credentials -------------------------------------------------------
+# No public default password. If the operator did not pin VNC_PASSWD, generate
+# one and print it exactly once; it lives in the data volume afterwards so a
+# container recreate keeps the same password.
+VNC_STATE="${SNOWLUMA_HOME}/data/.vnc-passwd"
+if [[ -n "${VNC_PASSWD:-}" ]]; then
+  printf '%s\n' "${VNC_PASSWD}" > "${VNC_STATE}"
+  chown "${SNOWLUMA_UID}:${SNOWLUMA_GID}" "${VNC_STATE}"
+  chmod 600 "${VNC_STATE}"
+  echo "远程桌面密码: ${VNC_PASSWD}"
+  echo "remote desktop password: ${VNC_PASSWD}"
+elif [[ ! -s "${VNC_STATE}" ]]; then
+  generated="$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | cut -c1-12)"
+  printf '%s\n' "${generated}" > "${VNC_STATE}"
+  chown "${SNOWLUMA_UID}:${SNOWLUMA_GID}" "${VNC_STATE}"
+  chmod 600 "${VNC_STATE}"
+  echo "远程桌面密码: ${generated}"
+  echo "remote desktop password: ${generated}"
+fi
+
+# x11vnc reads a password file created from the plaintext via -storepasswd.
+VNC_PASSFILE=/run/x11vnc.pass
+mkdir -p /run
+x11vnc -storepasswd "$(cat "${VNC_STATE}")" "${VNC_PASSFILE}" >/dev/null 2>&1
+chmod 644 "${VNC_PASSFILE}"
+
+# --- extra QQ homes (multi-account) ---------------------------------------
+# Each extra account needs its own HOME because Linux QQ takes a per-HOME
+# single-instance lock. Emit one supervisor program per entry.
+EXTRA_CONF=/etc/supervisor/conf.d/qq-extra.conf
+: > "${EXTRA_CONF}"
+index=0
+for home in ${SNOWLUMA_EXTRA_QQ_HOMES//,/ }; do
+  [[ -z "${home}" ]] && continue
+  index=$((index + 1))
+  mkdir -p "${home}"
+  chown -R "${SNOWLUMA_UID}:${SNOWLUMA_GID}" "${home}"
+  cat >> "${EXTRA_CONF}" <<EOF
+[program:qq-extra-${index}]
+command=/usr/local/bin/snowluma-qq-launch
+environment=HOME="${home}"
+user=snowluma
+autostart=true
+autorestart=true
+priority=20
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/stderr
+stderr_logfile_maxbytes=0
+EOF
+done
+
+exec "$@"

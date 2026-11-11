@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Launches the Linux QQ client inside the Xvfb display.
+#
+# The deb installs the launcher as `qq` on PATH; its real binary lives in
+# /opt/QQ. Resolve through PATH so a package layout change does not break the
+# image, and fail loudly if the client is missing.
+set -euo pipefail
+
+export DISPLAY="${DISPLAY:-:1}"
+
+qq_bin="$(command -v qq || true)"
+if [[ -z "${qq_bin}" ]]; then
+  for candidate in /opt/QQ/qq /usr/share/tencent-qq/qq; do
+    if [[ -x "${candidate}" ]]; then
+      qq_bin="${candidate}"
+      break
+    fi
+  done
+fi
+
+if [[ -z "${qq_bin}" ]]; then
+  echo "error: Linux QQ executable not found (looked on PATH, /opt/QQ/qq, /usr/share/tencent-qq/qq)" >&2
+  exit 127
+fi
+
+# QQ is Electron/Chromium based; the sandbox needs namespaces the container
+# does not grant, and GPU paths are unusable under Xvfb.
+exec "${qq_bin}" \
+  --no-sandbox \
+  ${SNOWLUMA_QQ_FLAGS:---disable-gpu --disable-software-rasterizer --disable-gpu-compositing} \
+  "$@"
