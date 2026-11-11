@@ -21,26 +21,12 @@ RUN corepack enable && corepack prepare pnpm@11.25.0 --activate
 
 WORKDIR /src
 
-# Dependency manifests first so the install layer survives source edits.
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
-COPY packages/common/package.json packages/common/
-COPY packages/bridge/package.json packages/bridge/
-COPY packages/core/package.json packages/core/
-COPY packages/mcp/package.json packages/mcp/
-COPY packages/onebot/package.json packages/onebot/
-COPY packages/proto-defs/package.json packages/proto-defs/
-COPY packages/protocol/package.json packages/protocol/
-COPY packages/proton/package.json packages/proton/
-COPY packages/runtime/package.json packages/runtime/
-COPY packages/sdk/package.json packages/sdk/
-COPY packages/sqlite/package.json packages/sqlite/
-COPY packages/ui/package.json packages/ui/
-COPY packages/webui/package.json packages/webui/
-COPY packages/websocket/package.json packages/websocket/
+# Copy the full tree before installing: several workspace packages expose a
+# `prepare` script that builds from src/, so a manifests-only install layer
+# would fail with "Cannot find src/index.ts". Correctness over layer caching.
+COPY . .
 
 RUN pnpm install --frozen-lockfile
-
-COPY . .
 
 # Inject the QQ hook addon's file capability so the unprivileged runtime user
 # can ptrace a QQ process it did not start, without relaxing host sysctls.
